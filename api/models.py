@@ -11,6 +11,11 @@ from datetime import datetime
 # Task Models
 # ============================================================================
 
+class CreateTaskRequest(BaseModel):
+    """Request to create a new task"""
+    task_type: str  # "uber_ride" or "shopify_order"
+    input_data: Dict[str, Any]  # Task-specific input data
+
 class TaskResponse(BaseModel):
     """Response when creating a new task"""
     task_id: str

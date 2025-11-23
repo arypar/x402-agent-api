@@ -17,7 +17,7 @@ from typing import Optional
 
 # Import models
 from api.models import (
-    UberRideRequest, ShopifySearchRequest, ShopifyOrderRequest,
+    CreateTaskRequest, ShopifySearchRequest,
     CoinbaseOnrampRequest, CoinbaseOnrampResponse,
     TaskResponse, TaskStatusResponse, TaskListResponse
 )
@@ -38,45 +38,92 @@ app = FastAPI(
 )
 
 # ============================================================================
-# Uber Endpoints (Task-based)
+# Task Creation Endpoint (Unified)
 # ============================================================================
 
-@app.post("/uber/book-ride", response_model=TaskResponse)
-async def book_uber_ride(request: UberRideRequest):
+@app.post("/tasks/create", response_model=TaskResponse)
+async def create_task(request: CreateTaskRequest):
     """
-    Create an Uber ride booking task
+    Create a new task (Uber ride or Shopify order)
+    
+    Task Types:
+    - "uber_ride": Book an Uber ride
+    - "shopify_order": Place a Shopify order
     
     Args:
-        from_address: Starting location
-        to_address: Destination location
+        task_type: Type of task to create
+        input_data: Task-specific input data
+        
+    For uber_ride:
+        input_data: {
+            "from_address": "123 Main St, San Francisco, CA",
+            "to_address": "456 Market St, San Francisco, CA"
+        }
+    
+    For shopify_order:
+        input_data: {
+            "product_url": "https://kith.com/products/item",
+            "size": "Medium"
+        }
     
     Returns:
         TaskResponse with task_id and status
     """
     try:
+        # Validate task_type
+        valid_task_types = ["uber_ride", "shopify_order"]
+        if request.task_type not in valid_task_types:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid task_type. Must be one of: {', '.join(valid_task_types)}"
+            )
+        
+        # Validate input_data based on task_type
+        if request.task_type == "uber_ride":
+            required_fields = ["from_address", "to_address"]
+            missing_fields = [f for f in required_fields if f not in request.input_data]
+            if missing_fields:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Missing required fields for uber_ride: {', '.join(missing_fields)}"
+                )
+        
+        elif request.task_type == "shopify_order":
+            required_fields = ["product_url", "size"]
+            missing_fields = [f for f in required_fields if f not in request.input_data]
+            if missing_fields:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Missing required fields for shopify_order: {', '.join(missing_fields)}"
+                )
+        
         # Create task in database
         task = TaskDatabase.create_task(
-            task_type="uber_ride",
-            input_data={
-                "from_address": request.from_address,
-                "to_address": request.to_address
-            }
+            task_type=request.task_type,
+            input_data=request.input_data
         )
+        
+        task_messages = {
+            "uber_ride": "Uber ride booking task created. Use the task_id to check status.",
+            "shopify_order": "Shopify order task created. Use the task_id to check status."
+        }
         
         return TaskResponse(
             task_id=task["id"],
             status=task["current_status"],
             type=task["type"],
-            message="Uber ride booking task created. Use the task_id to check status."
+            message=task_messages.get(request.task_type, "Task created successfully.")
         )
             
+    except HTTPException:
+        raise
     except Exception as e:
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Error creating task: {str(e)}")
 
 # ============================================================================
-# Shopify Endpoints
+# Shopify Search Endpoint (Instant)
 # ============================================================================
 
 @app.post("/shopify/search")
@@ -116,43 +163,8 @@ async def shopify_search(request: ShopifySearchRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error searching Shopify: {str(e)}")
 
-
-@app.post("/shopify/order", response_model=TaskResponse)
-async def shopify_order(request: ShopifyOrderRequest):
-    """
-    Create a Shopify order task
-    
-    Args:
-        product_url: URL of the Shopify product
-        size: Size to order (e.g., "M", "7", "Large")
-    
-    Returns:
-        TaskResponse with task_id and status
-    """
-    try:
-        # Create task in database
-        task = TaskDatabase.create_task(
-            task_type="shopify_order",
-            input_data={
-                "product_url": request.product_url,
-                "size": request.size
-            }
-        )
-        
-        return TaskResponse(
-            task_id=task["id"],
-            status=task["current_status"],
-            type=task["type"],
-            message="Shopify order task created. Use the task_id to check status."
-        )
-            
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Error creating task: {str(e)}")
-
 # ============================================================================
-# Coinbase Endpoints (No queue needed - instant)
+# Coinbase Onramp Endpoint (Instant)
 # ============================================================================
 
 @app.post("/coinbase/onramp", response_model=CoinbaseOnrampResponse)
@@ -352,9 +364,8 @@ async def health_check():
         "version": "2.0.0",
         "architecture": "async_task_queue",
         "endpoints": {
-            "uber": "/uber/book-ride (task-based)",
+            "create_task": "/tasks/create (task-based: uber_ride, shopify_order)",
             "shopify_search": "/shopify/search (instant)",
-            "shopify_order": "/shopify/order (task-based)",
             "coinbase_onramp": "/coinbase/onramp (instant)",
             "task_status": "/tasks/{task_id}",
             "list_tasks": "/tasks"
@@ -370,10 +381,10 @@ async def root():
         "version": "2.0.0",
         "architecture": "Async Task Queue with Supabase",
         "endpoints": {
-            "uber_ride": {
-                "path": "/uber/book-ride",
+            "create_task": {
+                "path": "/tasks/create",
                 "method": "POST",
-                "description": "Create Uber ride booking task",
+                "description": "Create task (uber_ride or shopify_order)",
                 "type": "async (returns task_id)"
             },
             "shopify_search": {
@@ -381,12 +392,6 @@ async def root():
                 "method": "POST",
                 "description": "Search for Shopify products",
                 "type": "synchronous (instant)"
-            },
-            "shopify_order": {
-                "path": "/shopify/order",
-                "method": "POST",
-                "description": "Create Shopify order task",
-                "type": "async (returns task_id)"
             },
             "coinbase_onramp": {
                 "path": "/coinbase/onramp",
@@ -411,9 +416,23 @@ async def root():
             }
         },
         "workflow": {
-            "1": "Submit task via POST endpoint → Get task_id",
-            "2": "Poll GET /tasks/{task_id} to check status",
+            "1": "Submit task via POST /tasks/create with task_type and input_data → Get task_id",
+            "2": "Poll GET /tasks/{task_id} to check status and progress",
             "3": "When status is 'completed', result_data contains the output"
+        },
+        "task_types": {
+            "uber_ride": {
+                "input_data": {
+                    "from_address": "string (required)",
+                    "to_address": "string (required)"
+                }
+            },
+            "shopify_order": {
+                "input_data": {
+                    "product_url": "string (required)",
+                    "size": "string (required)"
+                }
+            }
         }
     }
 

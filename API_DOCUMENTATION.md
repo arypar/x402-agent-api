@@ -10,18 +10,17 @@
 
 1. [Overview](#overview)
 2. [Authentication](#authentication)
-3. [Task-Based Endpoints](#task-based-endpoints)
-   - [Book Uber Ride](#1-book-uber-ride)
-   - [Place Shopify Order](#2-place-shopify-order)
+3. [Task Creation Endpoint](#task-creation-endpoint)
+   - [Create Task (Unified)](#1-create-task-unified)
 4. [Instant Endpoints](#instant-endpoints)
-   - [Search Shopify Products](#3-search-shopify-products)
-   - [Generate Coinbase Onramp URL](#4-generate-coinbase-onramp-url)
+   - [Search Shopify Products](#2-search-shopify-products)
+   - [Generate Coinbase Onramp URL](#3-generate-coinbase-onramp-url)
 5. [Task Management Endpoints](#task-management-endpoints)
-   - [Get Task Status](#5-get-task-status)
-   - [List Tasks](#6-list-tasks)
+   - [Get Task Status](#4-get-task-status)
+   - [List Tasks](#5-list-tasks)
 6. [Utility Endpoints](#utility-endpoints)
-   - [Health Check](#7-health-check)
-   - [API Info](#8-api-info)
+   - [Health Check](#6-health-check)
+   - [API Info](#7-api-info)
 7. [Task Status Flow](#task-status-flow)
 8. [Progress Tracking](#progress-tracking)
 9. [Error Handling](#error-handling)
@@ -61,25 +60,33 @@ Currently, the API does not require authentication. All endpoints are publicly a
 
 ---
 
-## Task-Based Endpoints
+## Task Creation Endpoint
 
-These endpoints return a `task_id` immediately. Tasks are processed asynchronously in the background.
+This unified endpoint creates tasks for long-running operations. Tasks are processed asynchronously in the background.
 
-### 1. Book Uber Ride
+### 1. Create Task (Unified)
 
-Book an Uber ride from one location to another.
+Create a new task by specifying the task type and providing the appropriate input data.
 
-**Endpoint**: `POST /uber/book-ride`
+**Endpoint**: `POST /tasks/create`
+
+#### Supported Task Types
+
+- **`uber_ride`** - Book an Uber ride
+- **`shopify_order`** - Place a Shopify order
 
 #### Request
 
 ```http
-POST https://undecorously-uncongestive-cindy.ngrok-free.dev/uber/book-ride
+POST https://undecorously-uncongestive-cindy.ngrok-free.dev/tasks/create
 Content-Type: application/json
 
 {
-  "from_address": "123 Main St, San Francisco, CA",
-  "to_address": "456 Market St, San Francisco, CA"
+  "task_type": "uber_ride",
+  "input_data": {
+    "from_address": "123 Main St, San Francisco, CA",
+    "to_address": "456 Market St, San Francisco, CA"
+  }
 }
 ```
 
@@ -87,12 +94,28 @@ Content-Type: application/json
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
+| `task_type` | string | Yes | Type of task: `"uber_ride"` or `"shopify_order"` |
+| `input_data` | object | Yes | Task-specific parameters (see below) |
+
+#### Input Data by Task Type
+
+**For `uber_ride`**:
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
 | `from_address` | string | Yes | Starting location (full address) |
 | `to_address` | string | Yes | Destination location (full address) |
 
+**For `shopify_order`**:
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `product_url` | string | Yes | Full URL to Shopify product page |
+| `size` | string | Yes | Size to order (e.g., "M", "Medium", "7", "Large") |
+
 #### Response
 
-**Success (202 Accepted)**:
+**Success (200 OK)**:
 ```json
 {
   "task_id": "550e8400-e29b-41d4-a716-446655440000",
@@ -102,10 +125,17 @@ Content-Type: application/json
 }
 ```
 
-**Error (400 Bad Request)**:
+**Error (400 Bad Request) - Invalid task_type**:
 ```json
 {
-  "detail": "Field required: from_address"
+  "detail": "Invalid task_type. Must be one of: uber_ride, shopify_order"
+}
+```
+
+**Error (400 Bad Request) - Missing fields**:
+```json
+{
+  "detail": "Missing required fields for uber_ride: from_address, to_address"
 }
 ```
 
@@ -116,11 +146,16 @@ Content-Type: application/json
 }
 ```
 
-#### Task Processing
+#### Task Processing Times
 
-Average processing time: **2-5 minutes**
+| Task Type | Average Time |
+|-----------|--------------|
+| `uber_ride` | 2-5 minutes |
+| `shopify_order` | 1-3 minutes |
 
-Progress updates:
+#### Progress Updates
+
+**For `uber_ride`**:
 1. Task started by worker-{id}
 2. Generating Uber ride URL
 3. Opening Uber app
@@ -129,68 +164,7 @@ Progress updates:
 6. Booking ride
 7. Ride booked successfully
 
-#### Example
-
-```bash
-curl -X POST "https://undecorously-uncongestive-cindy.ngrok-free.dev/uber/book-ride" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "from_address": "1 Apple Park Way, Cupertino, CA",
-    "to_address": "1600 Amphitheatre Parkway, Mountain View, CA"
-  }'
-```
-
----
-
-### 2. Place Shopify Order
-
-Automatically place an order on a Shopify store.
-
-**Endpoint**: `POST /shopify/order`
-
-#### Request
-
-```http
-POST https://undecorously-uncongestive-cindy.ngrok-free.dev/shopify/order
-Content-Type: application/json
-
-{
-  "product_url": "https://kith.com/products/hp-p020-051-1",
-  "size": "Medium"
-}
-```
-
-**Body Parameters**:
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `product_url` | string | Yes | Full URL to Shopify product page |
-| `size` | string | Yes | Size to order (e.g., "M", "Medium", "7", "Large") |
-
-#### Response
-
-**Success (202 Accepted)**:
-```json
-{
-  "task_id": "660e8400-e29b-41d4-a716-446655440001",
-  "status": "pending",
-  "type": "shopify_order",
-  "message": "Shopify order task created. Use the task_id to check status."
-}
-```
-
-**Error (400 Bad Request)**:
-```json
-{
-  "detail": "Field required: product_url"
-}
-```
-
-#### Task Processing
-
-Average processing time: **1-3 minutes**
-
-Progress updates:
+**For `shopify_order`**:
 1. Task started by worker-{id}
 2. Opening product page
 3. Selecting size: {size}
@@ -200,14 +174,33 @@ Progress updates:
 7. Processing payment
 8. Order placed successfully
 
-#### Example
+#### Examples
+
+**Uber Ride Example**:
 
 ```bash
-curl -X POST "https://undecorously-uncongestive-cindy.ngrok-free.dev/shopify/order" \
+curl -X POST "https://undecorously-uncongestive-cindy.ngrok-free.dev/tasks/create" \
   -H "Content-Type: application/json" \
   -d '{
-    "product_url": "https://kith.com/products/hp-p020-051-1",
-    "size": "Medium"
+    "task_type": "uber_ride",
+    "input_data": {
+      "from_address": "1 Apple Park Way, Cupertino, CA",
+      "to_address": "1600 Amphitheatre Parkway, Mountain View, CA"
+    }
+  }'
+```
+
+**Shopify Order Example**:
+
+```bash
+curl -X POST "https://undecorously-uncongestive-cindy.ngrok-free.dev/tasks/create" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "task_type": "shopify_order",
+    "input_data": {
+      "product_url": "https://kith.com/products/hp-p020-051-1",
+      "size": "Medium"
+    }
   }'
 ```
 
@@ -217,7 +210,7 @@ curl -X POST "https://undecorously-uncongestive-cindy.ngrok-free.dev/shopify/ord
 
 These endpoints return results immediately.
 
-### 3. Search Shopify Products
+### 2. Search Shopify Products
 
 Search for Shopify products using AI-powered search.
 
@@ -286,7 +279,7 @@ curl -X POST "https://undecorously-uncongestive-cindy.ngrok-free.dev/shopify/sea
 
 ---
 
-### 4. Generate Coinbase Onramp URL
+### 3. Generate Coinbase Onramp URL
 
 Generate a single-use Coinbase onramp URL for crypto purchases.
 
@@ -382,7 +375,7 @@ curl -X POST "https://undecorously-uncongestive-cindy.ngrok-free.dev/coinbase/on
 
 ## Task Management Endpoints
 
-### 5. Get Task Status
+### 4. Get Task Status
 
 Check the status and progress of a task.
 
@@ -470,7 +463,7 @@ curl "https://undecorously-uncongestive-cindy.ngrok-free.dev/tasks/550e8400-e29b
 
 ---
 
-### 6. List Tasks
+### 5. List Tasks
 
 Get a list of all tasks, optionally filtered by status.
 
@@ -540,7 +533,7 @@ curl "https://undecorously-uncongestive-cindy.ngrok-free.dev/tasks?status=failed
 
 ## Utility Endpoints
 
-### 7. Health Check
+### 6. Health Check
 
 Check if the API is running.
 
@@ -579,7 +572,7 @@ curl "https://undecorously-uncongestive-cindy.ngrok-free.dev/health"
 
 ---
 
-### 8. API Info
+### 7. API Info
 
 Get API information and available endpoints.
 
@@ -600,10 +593,10 @@ GET https://undecorously-uncongestive-cindy.ngrok-free.dev/
   "version": "2.0.0",
   "architecture": "Async Task Queue with Supabase",
   "endpoints": {
-    "uber_ride": {
-      "path": "/uber/book-ride",
+    "create_task": {
+      "path": "/tasks/create",
       "method": "POST",
-      "description": "Create Uber ride booking task",
+      "description": "Create task (uber_ride or shopify_order)",
       "type": "async (returns task_id)"
     },
     "shopify_search": {
@@ -611,12 +604,6 @@ GET https://undecorously-uncongestive-cindy.ngrok-free.dev/
       "method": "POST",
       "description": "Search for Shopify products",
       "type": "synchronous (instant)"
-    },
-    "shopify_order": {
-      "path": "/shopify/order",
-      "method": "POST",
-      "description": "Create Shopify order task",
-      "type": "async (returns task_id)"
     },
     "coinbase_onramp": {
       "path": "/coinbase/onramp",
@@ -641,9 +628,23 @@ GET https://undecorously-uncongestive-cindy.ngrok-free.dev/
     }
   },
   "workflow": {
-    "1": "Submit task via POST endpoint → Get task_id",
-    "2": "Poll GET /tasks/{task_id} to check status",
+    "1": "Submit task via POST /tasks/create with task_type and input_data → Get task_id",
+    "2": "Poll GET /tasks/{task_id} to check status and progress",
     "3": "When status is 'completed', result_data contains the output"
+  },
+  "task_types": {
+    "uber_ride": {
+      "input_data": {
+        "from_address": "string (required)",
+        "to_address": "string (required)"
+      }
+    },
+    "shopify_order": {
+      "input_data": {
+        "product_url": "string (required)",
+        "size": "string (required)"
+      }
+    }
   }
 }
 ```
@@ -698,10 +699,13 @@ import time
 
 # 1. Create task
 response = requests.post(
-    "https://undecorously-uncongestive-cindy.ngrok-free.dev/uber/book-ride",
+    "https://undecorously-uncongestive-cindy.ngrok-free.dev/tasks/create",
     json={
-        "from_address": "123 Main St, SF",
-        "to_address": "456 Market St, SF"
+        "task_type": "uber_ride",
+        "input_data": {
+            "from_address": "123 Main St, SF",
+            "to_address": "456 Market St, SF"
+        }
     }
 )
 task_id = response.json()["task_id"]
@@ -865,10 +869,13 @@ BASE_URL = "https://undecorously-uncongestive-cindy.ngrok-free.dev"
 def create_uber_ride(from_addr, to_addr):
     # Create task
     response = requests.post(
-        f"{BASE_URL}/uber/book-ride",
+        f"{BASE_URL}/tasks/create",
         json={
-            "from_address": from_addr,
-            "to_address": to_addr
+            "task_type": "uber_ride",
+            "input_data": {
+                "from_address": from_addr,
+                "to_address": to_addr
+            }
         }
     )
     response.raise_for_status()
@@ -911,10 +918,13 @@ print("Success!", result)
 ```python
 def place_shopify_order(product_url, size):
     response = requests.post(
-        f"{BASE_URL}/shopify/order",
+        f"{BASE_URL}/tasks/create",
         json={
-            "product_url": product_url,
-            "size": size
+            "task_type": "shopify_order",
+            "input_data": {
+                "product_url": product_url,
+                "size": size
+            }
         }
     )
     response.raise_for_status()
@@ -971,12 +981,15 @@ const BASE_URL = "https://undecorously-uncongestive-cindy.ngrok-free.dev";
 
 async function createUberRide(fromAddress, toAddress) {
   // Create task
-  const createResponse = await fetch(`${BASE_URL}/uber/book-ride`, {
+  const createResponse = await fetch(`${BASE_URL}/tasks/create`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      from_address: fromAddress,
-      to_address: toAddress
+      task_type: "uber_ride",
+      input_data: {
+        from_address: fromAddress,
+        to_address: toAddress
+      }
     })
   });
   
@@ -1024,11 +1037,14 @@ console.log("Success!", result);
 BASE_URL="https://undecorously-uncongestive-cindy.ngrok-free.dev"
 
 # Create Uber ride task
-RESPONSE=$(curl -s -X POST "$BASE_URL/uber/book-ride" \
+RESPONSE=$(curl -s -X POST "$BASE_URL/tasks/create" \
   -H "Content-Type: application/json" \
   -d '{
-    "from_address": "123 Main St, SF",
-    "to_address": "456 Market St, SF"
+    "task_type": "uber_ride",
+    "input_data": {
+      "from_address": "123 Main St, SF",
+      "to_address": "456 Market St, SF"
+    }
   }')
 
 TASK_ID=$(echo $RESPONSE | jq -r '.task_id')
@@ -1068,10 +1084,9 @@ These provide interactive documentation where you can test endpoints directly in
 https://undecorously-uncongestive-cindy.ngrok-free.dev
 ```
 
-### Task-Based Endpoints (Async)
+### Task Creation Endpoint (Async)
 ```bash
-POST /uber/book-ride          # Book Uber ride
-POST /shopify/order           # Place Shopify order
+POST /tasks/create            # Create task (uber_ride or shopify_order)
 ```
 
 ### Instant Endpoints (Sync)
