@@ -174,25 +174,98 @@ async def navigate_to_auth(uber_url: str, task_id: str = None) -> bool:
                 await request_button.click()
                 print("✓ Clicked request trip button - Ride requested!")
                 
-                # Wait for page to finish loading after clicking
+                # Stage 1: Monitor for payment errors OR ride confirmation (first 10 seconds)
                 add_progress("Processing ride request", task_id)
-                print("Waiting for page to finish loading...")
-                await page.wait_for_load_state("networkidle", timeout=30000)
-                await asyncio.sleep(2)  # Give it a moment to render any error messages
+                print("Stage 1: Monitoring for payment errors or ride confirmation for 10 seconds...")
                 
-                # Check if payment was declined
-                page_text = await page.inner_text("body")
-                if "Payment was declined" in page_text:
-                    add_progress("Payment declined", task_id)
-                    print("❌ Payment was declined - returning failed")
+                payment_failed = False
+                ride_confirmed = False
+                start_time = asyncio.get_event_loop().time()
+                
+                while (asyncio.get_event_loop().time() - start_time) < 10:
+                    # Get full HTML content (includes hidden fields)
+                    page_content = await page.content()
+                    
+                    # Check for payment errors first
+                    if "Try another payment method" in page_content:
+                        add_progress("❌ Payment method failed", task_id)
+                        print("❌ Try another payment method detected - closing browser and failing task")
+                        payment_failed = True
+                        break
+                    
+                    if "Payment was declined" in page_content:
+                        add_progress("❌ Payment declined", task_id)
+                        print("❌ Payment was declined - closing browser and failing task")
+                        payment_failed = True
+                        break
+                    
+                    if "PAYMENT_AUTH_DECLINED" in page_content:
+                        add_progress("❌ Payment authorization declined", task_id)
+                        print("❌ PAYMENT_AUTH_DECLINED detected - closing browser and failing task")
+                        payment_failed = True
+                        break
+                    
+                    # Check for ride confirmation messages
+                    if "Confirming your ride" in page_content or "Ride Requested" in page_content:
+                        add_progress("✅ Ride request confirmed", task_id)
+                        print("✓ Ride confirmed - moving to driver matching stage")
+                        ride_confirmed = True
+                        break
+                    
+                    # Wait 0.5 seconds before checking again
+                    await asyncio.sleep(0.5)
+                
+                if payment_failed:
+                    await browser.close()
                     return False
                 
-                add_progress("✅ Ride booked successfully", task_id)
+                if not ride_confirmed:
+                    print("⚠️ No explicit confirmation detected, but no payment error either - proceeding")
+                    add_progress("Ride processing", task_id)
                 
-                # Wait 10 minutes before closing
-                print("Waiting 10 minutes before closing browser...")
-                await asyncio.sleep(600)  # 10 minutes = 600 seconds
-                print("10 minutes elapsed, closing browser...")
+                # Stage 2: Wait for driver matching (monitor for status updates)
+                print("Stage 2: Waiting for driver matching...")
+                add_progress("Finding available drivers", task_id)
+                
+                # Monitor for up to 5 minutes for driver matching
+                driver_found_timeout = 300  # 5 minutes
+                driver_start_time = asyncio.get_event_loop().time()
+                
+                while (asyncio.get_event_loop().time() - driver_start_time) < driver_found_timeout:
+                    page_content = await page.content()
+                    current_url = page.url
+                    
+                    # Check if "Pickup in..." appears (driver assigned)
+                    if "Pickup in" in page_content:
+                        add_progress("✅ Driver assigned - Pickup confirmed", task_id)
+                        print("✓ Pickup confirmed - ride successfully booked!")
+                        await browser.close()
+                        return True
+                    
+                    # Check for "Finding available drivers" status
+                    if "Finding available drivers" in page_content:
+                        print("Status: Finding available drivers...")
+                        # Update status every 10 seconds to show we're still working
+                        elapsed = int(asyncio.get_event_loop().time() - driver_start_time)
+                        if elapsed > 0 and elapsed % 10 == 0:
+                            add_progress("Finding available drivers", task_id)
+                    
+                    # Check if redirected to a different page
+                    if "looking" not in current_url and current_url != uber_url:
+                        add_progress(f"✅ Redirected to: {current_url}", task_id)
+                        print(f"✓ Redirected to: {current_url}")
+                        await browser.close()
+                        return True
+                    
+                    # Wait 2 seconds before checking again
+                    await asyncio.sleep(2)
+                
+                # If we timeout waiting for driver, still consider it successful
+                # (the ride was requested, just no driver found yet)
+                add_progress("✅ Ride requested successfully (waiting for driver assignment)", task_id)
+                print("✓ Ride requested - exiting after timeout waiting for driver")
+                await browser.close()
+                return True
             except Exception as e:
                 print(f"⚠️  Error clicking request trip button: {e}")
                 raise

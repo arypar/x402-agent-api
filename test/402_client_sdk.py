@@ -18,6 +18,7 @@ from typing import Optional
 
 def example_core_client():
     """
+    
     Example using the core x402 client library.
     This is for general-purpose HTTP clients that need to handle x402 payments.
     """

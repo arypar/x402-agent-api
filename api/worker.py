@@ -31,13 +31,13 @@ class PaymentDeclinedException(Exception):
 class TaskWorker:
     """Background worker for processing tasks from the queue"""
     
-    def __init__(self, worker_id: str = None, poll_interval: int = 5, max_concurrent_tasks: int = 5):
+    def __init__(self, worker_id: str = None, poll_interval: int = 2, max_concurrent_tasks: int = 5):
         """
         Initialize the worker
         
         Args:
             worker_id: Unique identifier for this worker (defaults to hostname)
-            poll_interval: How often to check for new tasks (in seconds)
+            poll_interval: How often to check for new tasks (in seconds, default: 2)
             max_concurrent_tasks: Maximum number of tasks to process concurrently
         """
         self.worker_id = worker_id or f"worker-{socket.gethostname()}-{os.getpid()}"
@@ -83,12 +83,8 @@ class TaskWorker:
             success = await uber_api.navigate_to_auth(uber_url, task_id=task_id)
             
             if not success:
-                TaskDatabase.add_progress_update(task_id, "❌ Payment declined")
-                return {
-                    "success": False,
-                    "message": "Payment was declined or booking failed",
-                    "uber_url": uber_url
-                }
+                # Payment failed - raise exception to mark as failed without retry
+                raise PaymentDeclinedException("Payment method failed or was declined")
             
             return {
                 "success": True,
@@ -137,6 +133,8 @@ class TaskWorker:
                         "success": True,
                         "status": "Checked Out",
                         "message": "Order confirmed successfully",
+                        "order_url": result.get('order_url'),
+                        "checkout_url": result.get('checkout_url'),
                         "order_details": result
                     }
                 else:
@@ -376,7 +374,7 @@ async def main():
     """Main entry point for the worker"""
     # Get configuration from environment or use defaults
     worker_id = os.getenv("WORKER_ID")
-    poll_interval = int(os.getenv("POLL_INTERVAL", "5"))
+    poll_interval = int(os.getenv("POLL_INTERVAL", "2"))
     max_concurrent_tasks = int(os.getenv("MAX_CONCURRENT_TASKS", "5"))
     
     # Create and start worker

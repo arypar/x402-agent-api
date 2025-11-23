@@ -35,8 +35,8 @@ async function testUberTask() {
     const payload = {
         task_type: "uber_ride",
         input_data: {
-            from_address: "305 Jacaranda Drive, Fremont, CA 94539",
-            to_address: "1600 Amphitheatre Parkway, Mountain View, CA 94043"
+            from_address: "Av. Pres. Figueroa Alcorta 2099, C1112 Cdad. Autónoma de Buenos Aires",
+            to_address: "Guido 1770, C1016 Cdad. Autónoma de Buenos Aires"
         }
     };
 

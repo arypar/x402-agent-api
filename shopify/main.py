@@ -207,8 +207,8 @@ Return your response now:"""
         return None
 
 
-# Test data structure based on screenshot
-CHECKOUT_DATA = {
+# Default checkout data structure
+DEFAULT_CHECKOUT_DATA = {
     'email': 'aryanolegshivam@gmail.com',
     'country_region': 'United States',
     'first_name': 'Aryan',
@@ -219,10 +219,30 @@ CHECKOUT_DATA = {
     'state': 'California',
     'zip_code': '94539',
     'phone': '(510) 647-4689',
-    'card_number': '1',  # Left blank
-    'expiry': '11/30',  # Left blank
-    'cvv': '030'  # Left blank
+    'card_number': '4000000000009995',  # Default card number
+    'expiry': '11/30',
+    'cvv': '030'
 }
+
+
+def get_checkout_data(shop_domain):
+    """
+    Get checkout data based on shop domain
+    
+    Args:
+        shop_domain: The shop domain URL
+        
+    Returns:
+        dict: Checkout data with appropriate card number
+    """
+    checkout_data = DEFAULT_CHECKOUT_DATA.copy()
+    
+    # Special case for mimik-ai-3.myshopify.com - use card number "1"
+    if 'mimik-ai-3.myshopify.com' in shop_domain:
+        checkout_data['card_number'] = '1'
+        print("Using special card number '1' for mimik-ai-3.myshopify.com")
+    
+    return checkout_data
 
 
 async def make_request_with_retry(session, method, url, step_name, expected_status=200, max_retries=5, **kwargs):
@@ -318,6 +338,9 @@ async def shopify_checkout(product_url, size, visit_base_site=False, task_id=Non
         # Extract base site URL from product URL
         parsed = urlparse(product_url)
         shop_domain = f"{parsed.scheme}://{parsed.netloc}"
+        
+        # Get checkout data based on shop domain
+        CHECKOUT_DATA = get_checkout_data(shop_domain)
         
         add_progress("Connecting to store")
         
@@ -657,15 +680,18 @@ async def shopify_checkout(product_url, size, visit_base_site=False, task_id=Non
                 except Exception as e:
                     print(f"⚠️  Zipcode field not found: {str(e)}")
                 
-                # Phone
-                try:
-                    print("Waiting for phone field...")
-                    await page.wait_for_selector('input[name="phone"]', state='visible', timeout=10000)
-                    await page.fill('input[name="phone"]', CHECKOUT_DATA['phone'])
-                    print("✓ Phone filled")
-                    await asyncio.sleep(0.1)
-                except Exception as e:
-                    print(f"⚠️  Phone field not found: {str(e)}")
+                # Phone - skip for mimik site
+                if 'mimik-ai-3.myshopify.com' not in shop_domain:
+                    try:
+                        print("Waiting for phone field...")
+                        await page.wait_for_selector('input[name="phone"]', state='visible', timeout=10000)
+                        await page.fill('input[name="phone"]', CHECKOUT_DATA['phone'])
+                        print("✓ Phone filled")
+                        await asyncio.sleep(0.1)
+                    except Exception as e:
+                        print(f"⚠️  Phone field not found: {str(e)}")
+                else:
+                    print("⚠️  Skipping phone field for mimik site")
                 
                 # Wait a second for loading
                 await asyncio.sleep(1)
@@ -844,6 +870,11 @@ async def shopify_checkout(product_url, size, visit_base_site=False, task_id=Non
                     if confirmed_message in page_content:
                         print("\n✅ Order Confirmed!")
                         print("Order has been successfully placed.")
+                        
+                        # Get final order confirmation URL
+                        order_url = page.url
+                        print(f"Order confirmation URL: {order_url}")
+                        
                         print("Closing browser and marking task as complete...")
                         
                         # Close browser immediately
@@ -856,6 +887,7 @@ async def shopify_checkout(product_url, size, visit_base_site=False, task_id=Non
                             'message': 'Your order is confirmed',
                             'step': 'Order Complete',
                             'checkout_url': checkout_url,
+                            'order_url': order_url,
                             'request_log': request_log
                         }
                     
@@ -868,6 +900,11 @@ async def shopify_checkout(product_url, size, visit_base_site=False, task_id=Non
                     if confirmed_message in page_content:
                         print("\n✅ Order Confirmed!")
                         print("Order has been successfully placed.")
+                        
+                        # Get final order confirmation URL
+                        order_url = page.url
+                        print(f"Order confirmation URL: {order_url}")
+                        
                         print("Closing browser and marking task as complete...")
                         
                         # Close browser immediately
@@ -880,6 +917,7 @@ async def shopify_checkout(product_url, size, visit_base_site=False, task_id=Non
                             'message': 'Your order is confirmed',
                             'step': 'Order Complete',
                             'checkout_url': checkout_url,
+                            'order_url': order_url,
                             'request_log': request_log
                         }
                     
