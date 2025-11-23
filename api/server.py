@@ -1,6 +1,7 @@
 """
-FastAPI Server
+FastAPI Server with Async Task Queue
 Combines Uber ride booking and Shopify search/ordering endpoints
+All long-running tasks are queued and processed by workers
 """
 
 import sys
@@ -12,128 +13,76 @@ if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
 
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-from typing import Optional, List, Dict, Any
+from typing import Optional
 
-# Import Uber functionality (from uber folder)
-import uber.uber_api as uber_api
+# Import models
+from api.models import (
+    UberRideRequest, ShopifySearchRequest, ShopifyOrderRequest,
+    CoinbaseOnrampRequest, CoinbaseOnrampResponse,
+    TaskResponse, TaskStatusResponse, TaskListResponse
+)
 
-# Import Shopify functionality (from shopify folder)
+# Import database
+from api.database import TaskDatabase
+
+# Import Shopify search (synchronous, no queue needed)
 import shopify.shopifysearch as shopify_search_module
-import shopify.main as shopify_main_module
 
-# Import Coinbase functionality (from coinbase folder)
+# Import Coinbase functionality (synchronous, no queue needed)
 import coinbase.onramp as coinbase_onramp
 
 app = FastAPI(
-    title="Manual Script API",
-    description="API for Uber rides, Shopify search, and Shopify checkout",
-    version="1.0.0"
+    title="Manual Script API (Async Task Queue)",
+    description="API for Uber rides, Shopify search, and Shopify checkout with async task processing",
+    version="2.0.0"
 )
 
 # ============================================================================
-# Request/Response Models
+# Uber Endpoints (Task-based)
 # ============================================================================
 
-class UberRideRequest(BaseModel):
-    from_address: str
-    to_address: str
-
-class UberRideResponse(BaseModel):
-    success: bool
-    message: str
-    uber_url: Optional[str] = None
-
-class ShopifySearchRequest(BaseModel):
-    query: str
-    num_results: Optional[int] = 5
-
-class ShopifySearchResponse(BaseModel):
-    success: bool
-    results: List[str]
-    count: int
-
-class ShopifyOrderRequest(BaseModel):
-    product_url: str
-    size: str
-
-class ShopifyOrderResponse(BaseModel):
-    success: bool
-    message: Optional[str] = None
-    error: Optional[str] = None
-    order_details: Optional[Dict[str, Any]] = None
-
-class CoinbaseOnrampRequest(BaseModel):
-    destination_address: str
-    destination_network: str
-    purchase_currency: str
-    payment_amount: str
-    payment_currency: str
-    payment_method: str
-    country: str
-    subdivision: str
-    client_ip: str
-    redirect_url: str
-    partner_user_ref: str
-
-class CoinbaseOnrampResponse(BaseModel):
-    success: bool
-    onramp_url: Optional[str] = None
-    error: Optional[str] = None
-    session_data: Optional[Dict[str, Any]] = None
-
-# ============================================================================
-# Uber Endpoints
-# ============================================================================
-
-@app.post("/uber/book-ride", response_model=UberRideResponse)
+@app.post("/uber/book-ride", response_model=TaskResponse)
 async def book_uber_ride(request: UberRideRequest):
     """
-    Book an Uber ride from one address to another
+    Create an Uber ride booking task
     
     Args:
         from_address: Starting location
         to_address: Destination location
     
     Returns:
-        UberRideResponse with success status and Uber URL
+        TaskResponse with task_id and status
     """
     try:
-        # Step 1: Generate Uber URL
-        print(f"Generating Uber URL for {request.from_address} to {request.to_address}")
-        uber_url = await uber_api.generate_uber_url(request.from_address, request.to_address)
-        print(f"Generated URL: {uber_url}")
+        # Create task in database
+        task = TaskDatabase.create_task(
+            task_type="uber_ride",
+            input_data={
+                "from_address": request.from_address,
+                "to_address": request.to_address
+            }
+        )
         
-        # Step 2: Navigate to URL and book ride
-        print("Starting browser automation to book ride...")
-        success = await uber_api.navigate_to_auth(uber_url)
-        
-        if not success:
-            return UberRideResponse(
-                success=False,
-                message="Payment was declined or booking failed",
-                uber_url=uber_url
-            )
-        
-        return UberRideResponse(
-            success=True,
-            message="Ride booking process completed",
-            uber_url=uber_url
+        return TaskResponse(
+            task_id=task["id"],
+            status=task["current_status"],
+            type=task["type"],
+            message="Uber ride booking task created. Use the task_id to check status."
         )
             
     except Exception as e:
         import traceback
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Error booking ride: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error creating task: {str(e)}")
 
 # ============================================================================
 # Shopify Endpoints
 # ============================================================================
 
-@app.post("/shopify/search", response_model=ShopifySearchResponse)
+@app.post("/shopify/search")
 async def shopify_search(request: ShopifySearchRequest):
     """
-    Search for Shopify products using Exa API
+    Search for Shopify products using Exa API (synchronous, no queue)
     
     Args:
         query: Search query (e.g., "black tshirt")
@@ -149,69 +98,72 @@ async def shopify_search(request: ShopifySearchRequest):
         results = shopify_search_module.search_shopify_products(request.query, num_results=num_results)
         
         if not results:
-            return ShopifySearchResponse(
-                success=False,
-                results=[],
-                count=0
-            )
+            return {
+                "success": False,
+                "results": [],
+                "count": 0
+            }
         
         # Limit to requested number of results
         limited_results = results[:num_results]
         
-        return ShopifySearchResponse(
-            success=True,
-            results=limited_results,
-            count=len(limited_results)
-        )
+        return {
+            "success": True,
+            "results": limited_results,
+            "count": len(limited_results)
+        }
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error searching Shopify: {str(e)}")
 
-@app.post("/shopify/order", response_model=ShopifyOrderResponse)
+
+@app.post("/shopify/order", response_model=TaskResponse)
 async def shopify_order(request: ShopifyOrderRequest):
     """
-    Place an order on a Shopify store
+    Create a Shopify order task
     
     Args:
         product_url: URL of the Shopify product
         size: Size to order (e.g., "M", "7", "Large")
     
     Returns:
-        ShopifyOrderResponse with order status and details
+        TaskResponse with task_id and status
     """
     try:
-        print(f"Processing Shopify order for: {request.product_url}, size: {request.size}")
+        # Create task in database
+        task = TaskDatabase.create_task(
+            task_type="shopify_order",
+            input_data={
+                "product_url": request.product_url,
+                "size": request.size
+            }
+        )
         
-        # Call the shopify_checkout function
-        result = await shopify_main_module.shopify_checkout(request.product_url, request.size)
-        
-        # Check if the checkout was successful
-        if result.get('success'):
-            return ShopifyOrderResponse(
-                success=True,
-                message="Order placed successfully",
-                order_details=result
-            )
-        else:
-            return ShopifyOrderResponse(
-                success=False,
-                error=result.get('error', 'Unknown error occurred'),
-                order_details=result
-            )
+        return TaskResponse(
+            task_id=task["id"],
+            status=task["current_status"],
+            type=task["type"],
+            message="Shopify order task created. Use the task_id to check status."
+        )
             
     except Exception as e:
         import traceback
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Error placing Shopify order: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error creating task: {str(e)}")
 
 # ============================================================================
-# Coinbase Endpoints
+# Coinbase Endpoints (No queue needed - instant)
 # ============================================================================
 
 @app.post("/coinbase/onramp", response_model=CoinbaseOnrampResponse)
 async def create_coinbase_onramp(request: CoinbaseOnrampRequest):
     """
     Generate a Coinbase onramp URL for crypto purchases
+    
+    ⚠️ IMPORTANT: Each onramp URL is SINGLE-USE ONLY!
+    - Once used to launch Coinbase Onramp, the URL becomes invalid
+    - Call this endpoint again to generate a fresh URL for each new transaction
+    - Do NOT cache, reuse, or share the generated URLs
     
     Args:
         destination_address: Wallet address to receive crypto
@@ -245,12 +197,13 @@ async def create_coinbase_onramp(request: CoinbaseOnrampRequest):
             "partnerUserRef": request.partner_user_ref
         }
         
-        print(f"Generating Coinbase onramp URL with config: {session_config}")
+        print("⚠️ Generating NEW single-use Coinbase onramp URL")
+        print(f"Config: {session_config}")
         
-        # Generate JWT
+        # Generate JWT (fresh token for this request)
         jwt_token = coinbase_onramp.generate_jwt("POST", coinbase_onramp.API_PATH)
         
-        # Create onramp session
+        # Create onramp session (generates fresh sessionToken)
         session_data = coinbase_onramp.create_onramp_session(jwt_token, session_config)
         
         # Extract onramp URL
@@ -263,19 +216,129 @@ async def create_coinbase_onramp(request: CoinbaseOnrampRequest):
                 session_data=session_data
             )
         
+        print(f"✓ Generated fresh onramp URL (single-use): {onramp_url[:50]}...")
+        
         return CoinbaseOnrampResponse(
             success=True,
             onramp_url=onramp_url,
-            session_data=session_data
+            session_data=session_data,
+            message="⚠️ This URL is single-use only. Call this endpoint again to generate a new URL."
         )
         
     except Exception as e:
         import traceback
         traceback.print_exc()
+        error_msg = str(e)
+        
+        # Check if it's the session token reuse error
+        if "sessionToken" in error_msg and "already been used" in error_msg:
+            error_msg = "Session token already used. This should not happen - a fresh token is generated for each request. Please check your implementation."
+        
         return CoinbaseOnrampResponse(
             success=False,
-            error=str(e)
+            error=error_msg
         )
+
+# ============================================================================
+# Task Management Endpoints
+# ============================================================================
+
+@app.get("/tasks/{task_id}", response_model=TaskStatusResponse)
+async def get_task_status(task_id: str):
+    """
+    Get the status of a task by ID
+    
+    Returns the complete task data including:
+    - current_status: pending, processing, completed, or failed
+    - result_data: Full JSONB column value from Supabase including:
+      - progress: Array of progress updates with timestamps
+      - Final result data when completed
+    - input_data: Original request parameters
+    - Timestamps: created_at, started_at, completed_at
+    
+    Args:
+        task_id: UUID of the task
+    
+    Returns:
+        TaskStatusResponse with complete task data including full result_data column
+    """
+    try:
+        # Get complete task data from Supabase (SELECT *)
+        task = TaskDatabase.get_task(task_id)
+        
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+        
+        # Return complete result_data column as-is from Supabase
+        return TaskStatusResponse(
+            task_id=task["id"],
+            type=task["type"],
+            current_status=task["current_status"],
+            input_data=task["input_data"],
+            result_data=task.get("result_data"),  # Complete JSONB column value
+            error_message=task.get("error_message"),
+            retry_count=task.get("retry_count", 0),
+            created_at=task["created_at"],
+            updated_at=task["updated_at"],
+            started_at=task.get("started_at"),
+            completed_at=task.get("completed_at")
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Error getting task status: {str(e)}")
+
+
+@app.get("/tasks", response_model=TaskListResponse)
+async def list_tasks(
+    status: Optional[str] = None,
+    limit: int = 50
+):
+    """
+    List tasks, optionally filtered by status
+    
+    Args:
+        status: Filter by status (pending, processing, completed, failed)
+        limit: Maximum number of tasks to return (default: 50)
+    
+    Returns:
+        TaskListResponse with list of tasks
+    """
+    try:
+        if status:
+            tasks = TaskDatabase.get_tasks_by_status(status, limit)
+        else:
+            tasks = TaskDatabase.get_all_tasks(limit)
+        
+        task_responses = [
+            TaskStatusResponse(
+                task_id=task["id"],
+                type=task["type"],
+                current_status=task["current_status"],
+                input_data=task["input_data"],
+                result_data=task.get("result_data"),
+                error_message=task.get("error_message"),
+                retry_count=task.get("retry_count", 0),
+                created_at=task["created_at"],
+                updated_at=task["updated_at"],
+                started_at=task.get("started_at"),
+                completed_at=task.get("completed_at")
+            )
+            for task in tasks
+        ]
+        
+        return TaskListResponse(
+            tasks=task_responses,
+            count=len(task_responses)
+        )
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Error listing tasks: {str(e)}")
 
 # ============================================================================
 # Health Check
@@ -286,50 +349,75 @@ async def health_check():
     """Health check endpoint"""
     return {
         "status": "healthy",
+        "version": "2.0.0",
+        "architecture": "async_task_queue",
         "endpoints": {
-            "uber": "/uber/book-ride",
-            "shopify_search": "/shopify/search",
-            "shopify_order": "/shopify/order",
-            "coinbase_onramp": "/coinbase/onramp"
+            "uber": "/uber/book-ride (task-based)",
+            "shopify_search": "/shopify/search (instant)",
+            "shopify_order": "/shopify/order (task-based)",
+            "coinbase_onramp": "/coinbase/onramp (instant)",
+            "task_status": "/tasks/{task_id}",
+            "list_tasks": "/tasks"
         }
     }
+
 
 @app.get("/")
 async def root():
     """Root endpoint with API information"""
     return {
         "name": "Manual Script API",
-        "version": "1.0.0",
+        "version": "2.0.0",
+        "architecture": "Async Task Queue with Supabase",
         "endpoints": {
             "uber_ride": {
                 "path": "/uber/book-ride",
                 "method": "POST",
-                "description": "Book an Uber ride"
+                "description": "Create Uber ride booking task",
+                "type": "async (returns task_id)"
             },
             "shopify_search": {
                 "path": "/shopify/search",
                 "method": "POST",
-                "description": "Search for Shopify products"
+                "description": "Search for Shopify products",
+                "type": "synchronous (instant)"
             },
             "shopify_order": {
                 "path": "/shopify/order",
                 "method": "POST",
-                "description": "Place an order on Shopify"
+                "description": "Create Shopify order task",
+                "type": "async (returns task_id)"
             },
             "coinbase_onramp": {
                 "path": "/coinbase/onramp",
                 "method": "POST",
-                "description": "Generate Coinbase onramp URL"
+                "description": "Generate Coinbase onramp URL",
+                "type": "synchronous (instant)"
+            },
+            "task_status": {
+                "path": "/tasks/{task_id}",
+                "method": "GET",
+                "description": "Check task status by ID"
+            },
+            "list_tasks": {
+                "path": "/tasks",
+                "method": "GET",
+                "description": "List all tasks (optionally filter by status)"
             },
             "health": {
                 "path": "/health",
                 "method": "GET",
                 "description": "Health check"
             }
+        },
+        "workflow": {
+            "1": "Submit task via POST endpoint → Get task_id",
+            "2": "Poll GET /tasks/{task_id} to check status",
+            "3": "When status is 'completed', result_data contains the output"
         }
     }
+
 
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
-

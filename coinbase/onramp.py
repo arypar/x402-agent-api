@@ -153,6 +153,12 @@ def create_fresh_onramp_link(custom_config: Optional[Dict[str, Any]] = None) -> 
     """
     Generate a fresh, single-use onramp link.
     
+    ⚠️ CRITICAL: Each onramp URL is SINGLE-USE ONLY!
+    - Once the URL is opened/used to launch Coinbase Onramp, it becomes invalid
+    - You MUST call this function again to generate a new URL for each transaction
+    - Do NOT cache, store, or reuse the generated URLs
+    - Do NOT share URLs between users or sessions
+    
     Args:
         custom_config: Optional custom session configuration. If None, uses SESSION_CONFIG.
     
