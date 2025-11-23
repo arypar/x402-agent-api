@@ -1,0 +1,17 @@
+{
+  "name": "coinbase-onramp",
+  "version": "1.0.0",
+  "description": "Coinbase CDP JWT generation for onramp links",
+  "main": "onramp.js",
+  "scripts": {
+    "start": "node onramp.js",
+    "test": "node onramp.js"
+  },
+  "dependencies": {
+    "@coinbase/cdp-sdk": "^2.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
+
