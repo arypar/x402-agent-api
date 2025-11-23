@@ -14,6 +14,7 @@ if parent_dir not in sys.path:
 
 from fastapi import FastAPI, HTTPException
 from typing import Optional
+from x402.fastapi.middleware import require_payment
 
 # Import models
 from api.models import (
@@ -35,6 +36,17 @@ app = FastAPI(
     title="Manual Script API (Async Task Queue)",
     description="API for Uber rides, Shopify search, and Shopify checkout with async task processing",
     version="2.0.0"
+)
+
+# x402 payment protection for task creation endpoint
+# Requires 0.001 ETH payment on Base network
+app.middleware("http")(
+    require_payment(
+        price="0.01",  # 0.001 ETH per task creation
+        pay_to_address="0xda2964669a27ae905d4b114c52eb63ba2fab6d7f",
+        path=["/tasks/create"],  # Only protect task creation endpoint
+        network="base-sepolia"  # Base mainnet (use "base-sepolia" for testnet)
+    )
 )
 
 # ============================================================================

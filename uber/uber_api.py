@@ -37,8 +37,27 @@ def load_cookies(filepath=COOKIE_FILE):
         print(f"⚠️  Failed to load cookies: {e}")
         return []
 
-async def generate_uber_url(from_address: str, to_address: str) -> str:
+def add_progress(message, task_id=None):
+    """Helper function to add progress updates if task_id is provided"""
+    if task_id:
+        try:
+            # Import here to avoid circular dependency
+            import sys
+            import os
+            parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            if parent_dir not in sys.path:
+                sys.path.insert(0, parent_dir)
+            from api.database import TaskDatabase
+            TaskDatabase.add_progress_update(task_id, message)
+        except Exception as e:
+            print(f"Warning: Could not add progress update: {str(e)}")
+    print(f"Progress: {message}")
+
+
+async def generate_uber_url(from_address: str, to_address: str, task_id: str = None) -> str:
     """Use Claude to generate an Uber URL from addresses using /looking endpoint"""
+    
+    add_progress("Converting addresses to coordinates", task_id)
     
     prompt = f"""Given these two addresses, provide the latitude and longitude coordinates for each:
 
@@ -87,6 +106,8 @@ Return ONLY the JSON, nothing else. No explanations, no markdown formatting."""
         drop_lat = coords["drop"]["latitude"]
         drop_lng = coords["drop"]["longitude"]
         
+        add_progress("Generating Uber ride URL", task_id)
+        
         # Build the Uber /looking URL (compact JSON without spaces)
         pickup_data = json.dumps({"latitude": pickup_lat, "longitude": pickup_lng}, separators=(',', ':'))
         drop_data = json.dumps({"latitude": drop_lat, "longitude": drop_lng}, separators=(',', ':'))
@@ -96,6 +117,8 @@ Return ONLY the JSON, nothing else. No explanations, no markdown formatting."""
         
         url = f"https://m.uber.com/looking?pickup={pickup_encoded}&drop%5B0%5D={drop_encoded}"
         
+        add_progress("Uber URL generated successfully", task_id)
+        
         return url
     except Exception as e:
         print(f"Error generating Uber URL: {e}")
@@ -103,17 +126,22 @@ Return ONLY the JSON, nothing else. No explanations, no markdown formatting."""
         traceback.print_exc()
         raise
 
-async def navigate_to_auth(uber_url: str) -> bool:
+async def navigate_to_auth(uber_url: str, task_id: str = None) -> bool:
     """Navigate to generated Uber URL and book ride (assumes cookies are ready from session farmer)
     Returns True if successful, False if payment was declined"""
+    
+    add_progress("Loading authentication session", task_id)
+    
     # Load cookies from session farmer
     cookies = load_cookies()
     
     if not cookies:
+        add_progress("Authentication failed - No session found", task_id)
         raise Exception("No cookies found! Please run session_farmer.py first to log in.")
     
     async with async_playwright() as p:
         # Launch browser with basic settings
+        add_progress("Opening Uber app", task_id)
         browser = await p.chromium.launch(headless=False)
         
         try:
@@ -127,21 +155,27 @@ async def navigate_to_auth(uber_url: str) -> bool:
             page = await context.new_page()
             
             # Navigate to the generated Uber URL
+            add_progress("Loading ride details", task_id)
             print(f"Navigating to: {uber_url}")
             await page.goto(uber_url, wait_until="domcontentloaded", timeout=60000)
             print("✓ Page loaded")
+            add_progress("Ride details loaded", task_id)
             
             # Wait for the request trip button and click it
             try:
+                add_progress("Waiting for ride options to load", task_id)
                 print("Waiting for request trip button...")
                 request_button = page.locator('[data-testid="request_trip_button"]')
                 await request_button.wait_for(state='visible', timeout=30000)
                 print("✓ Request trip button found. Waiting 0.5 seconds before clicking...")
                 await asyncio.sleep(0.5)
+                
+                add_progress("Requesting ride", task_id)
                 await request_button.click()
                 print("✓ Clicked request trip button - Ride requested!")
                 
                 # Wait for page to finish loading after clicking
+                add_progress("Processing ride request", task_id)
                 print("Waiting for page to finish loading...")
                 await page.wait_for_load_state("networkidle", timeout=30000)
                 await asyncio.sleep(2)  # Give it a moment to render any error messages
@@ -149,8 +183,11 @@ async def navigate_to_auth(uber_url: str) -> bool:
                 # Check if payment was declined
                 page_text = await page.inner_text("body")
                 if "Payment was declined" in page_text:
+                    add_progress("Payment declined", task_id)
                     print("❌ Payment was declined - returning failed")
                     return False
+                
+                add_progress("✅ Ride booked successfully", task_id)
                 
                 # Wait 10 minutes before closing
                 print("Waiting 10 minutes before closing browser...")

@@ -1,12 +1,136 @@
 import requests
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlencode
 import json
 from playwright.async_api import async_playwright
 import asyncio
 from anthropic import AsyncAnthropic
 from dotenv import load_dotenv
+import re
+from bs4 import BeautifulSoup
 
 load_dotenv()
+
+
+def extract_authenticity_token(html_content):
+    """Extract authenticity token from HTML response
+    
+    Args:
+        html_content (str): HTML content from the response
+        
+    Returns:
+        str: The authenticity token value
+        
+    Raises:
+        ValueError: If token cannot be found
+    """
+    try:
+        soup = BeautifulSoup(html_content, 'html.parser')
+        
+        # Look for the hidden input field with name="authenticity_token"
+        token_input = soup.find('input', {'name': 'authenticity_token', 'type': 'hidden'})
+        
+        if token_input and token_input.get('value'):
+            token = token_input.get('value')
+            print(f"✓ Extracted authenticity token: {token[:20]}...")
+            return token
+        
+        # Fallback: Try to find it using regex
+        token_match = re.search(r'name="authenticity_token"\s+value="([^"]+)"', html_content)
+        if token_match:
+            token = token_match.group(1)
+            print(f"✓ Extracted authenticity token (via regex): {token[:20]}...")
+            return token
+        
+        raise ValueError("Authenticity token not found in HTML response")
+        
+    except Exception as e:
+        raise ValueError(f"Failed to extract authenticity token: {str(e)}")
+
+
+async def handle_password_protected_store(session, shop_domain):
+    """
+    Handle password-protected Shopify stores (special case for mimik-ai-3.myshopify.com)
+    
+    Args:
+        session: requests.Session object
+        shop_domain: Base domain of the shop
+        
+    Returns:
+        bool: True if password authentication was successful or not needed
+        
+    Raises:
+        Exception: If password authentication fails
+    """
+    # Check if this is a password-protected store we know about
+    if 'mimik-ai-3.myshopify.com' not in shop_domain:
+        return True  # Not a password-protected store we handle
+    
+    print(f"\n[Password Protection] Detected password-protected store: {shop_domain}")
+    
+    try:
+        # Step 1: GET password page
+        password_url = f"{shop_domain}/password"
+        print("[Password Protection] Fetching password page...")
+        
+        headers = {
+            'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'accept-language': 'en-US,en;q=0.9',
+            'cache-control': 'max-age=0',
+            'priority': 'u=0, i',
+            'sec-ch-ua': '"Chromium";v="142", "Google Chrome";v="142", "Not_A Brand";v="99"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"macOS"',
+            'sec-fetch-dest': 'document',
+            'sec-fetch-mode': 'navigate',
+            'sec-fetch-site': 'none',
+            'sec-fetch-user': '?1',
+            'upgrade-insecure-requests': '1',
+            'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36'
+        }
+        
+        response = session.get(password_url, headers=headers, timeout=10)
+        response.raise_for_status()
+        print(f"✓ Fetched password page (Status: {response.status_code})")
+        
+        # Step 2: Extract authenticity token
+        print("[Password Protection] Extracting authenticity token...")
+        authenticity_token = extract_authenticity_token(response.text)
+        
+        # Step 3: POST with password
+        print("[Password Protection] Submitting password...")
+        
+        payload = urlencode({
+            'authenticity_token': authenticity_token,
+            'password': 'aryanparekh'
+        })
+        
+        post_headers = {
+            'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'accept-language': 'en-US,en;q=0.9',
+            'cache-control': 'max-age=0',
+            'content-type': 'application/x-www-form-urlencoded',
+            'origin': shop_domain,
+            'priority': 'u=0, i',
+            'sec-ch-ua': '"Chromium";v="142", "Google Chrome";v="142", "Not_A Brand";v="99"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"macOS"',
+            'sec-fetch-dest': 'document',
+            'sec-fetch-mode': 'navigate',
+            'sec-fetch-site': 'same-origin',
+            'sec-fetch-user': '?1',
+            'upgrade-insecure-requests': '1',
+            'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36'
+        }
+        
+        auth_response = session.post(password_url, headers=post_headers, data=payload, timeout=10, allow_redirects=True)
+        auth_response.raise_for_status()
+        print(f"✓ Password authentication successful (Status: {auth_response.status_code})")
+        
+        return True
+        
+    except Exception as e:
+        print(f"✗ Password authentication failed: {str(e)}")
+        raise Exception(f"Failed to authenticate with password-protected store: {str(e)}")
 
 
 async def find_size_match_with_claude(user_size, available_sizes):
@@ -95,7 +219,7 @@ CHECKOUT_DATA = {
     'state': 'California',
     'zip_code': '94539',
     'phone': '(510) 647-4689',
-    'card_number': '4000000000009995',  # Left blank
+    'card_number': '1',  # Left blank
     'expiry': '11/30',  # Left blank
     'cvv': '030'  # Left blank
 }
@@ -152,7 +276,7 @@ async def make_request_with_retry(session, method, url, step_name, expected_stat
     raise Exception(f"{step_name} failed after {max_retries} attempts")
 
 
-async def shopify_checkout(product_url, size, visit_base_site=False):
+async def shopify_checkout(product_url, size, visit_base_site=False, task_id=None):
     """
     Shopify cart add flow:
     1. Uses requests session to visit base site (optional), then product .js endpoint
@@ -166,7 +290,18 @@ async def shopify_checkout(product_url, size, visit_base_site=False):
         product_url: URL of the Shopify product page
         size: Size to add to cart
         visit_base_site: Whether to visit the base site first (default: True)
+        task_id: Optional task ID for progress updates
     """
+    
+    # Helper function to add progress updates if task_id is provided
+    def add_progress(message):
+        if task_id:
+            try:
+                from api.database import TaskDatabase
+                TaskDatabase.add_progress_update(task_id, message)
+            except Exception as e:
+                print(f"Warning: Could not add progress update: {str(e)}")
+        print(f"Progress: {message}")
     
     # Step 1: Use requests session to visit base site first, then product .js endpoint
     session = requests.Session()
@@ -183,6 +318,21 @@ async def shopify_checkout(product_url, size, visit_base_site=False):
         # Extract base site URL from product URL
         parsed = urlparse(product_url)
         shop_domain = f"{parsed.scheme}://{parsed.netloc}"
+        
+        add_progress("Connecting to store")
+        
+        # Handle password-protected stores (special case)
+        try:
+            await handle_password_protected_store(session, shop_domain)
+        except Exception as e:
+            add_progress("Store authentication failed")
+            return {
+                'success': False,
+                'error': str(e),
+                'step': 'Password Authentication',
+                'url': shop_domain,
+                'request_log': request_log
+            }
         
         # Visit base site first (if enabled)
         if visit_base_site:
@@ -206,6 +356,7 @@ async def shopify_checkout(product_url, size, visit_base_site=False):
         product_slug = product_url.split('/products/')[-1].split('?')[0]
         product_js_url = f"{shop_domain}/products/{product_slug}.js"
         
+        add_progress("Loading product information")
         print(f"Fetching product data from: {product_js_url}")
         try:
             product_response = await make_request_with_retry(session, 'get', product_js_url, 'Step 2: Fetch product data', expected_status=200)
@@ -229,6 +380,7 @@ async def shopify_checkout(product_url, size, visit_base_site=False):
         variant_id = None
         size_lower = size.lower()
         
+        add_progress(f"Finding size: {size}")
         print(f"Looking for variant with size: {size}")
         for variant in product_data.get('variants', []):
             variant_title = variant.get('title', '').lower()
@@ -242,6 +394,7 @@ async def shopify_checkout(product_url, size, visit_base_site=False):
             available_sizes = [v.get('title') for v in product_data.get('variants', [])]
             print(f"No exact match found. Available sizes: {available_sizes}")
             print("Asking Claude to find best match...")
+            add_progress("Matching size availability")
             
             matched_size = await find_size_match_with_claude(size, available_sizes)
             
@@ -253,6 +406,7 @@ async def shopify_checkout(product_url, size, visit_base_site=False):
                         print(f"✓ Found variant ID: {variant_id} for matched size: {variant.get('title')}")
                         break
             else:
+                add_progress(f"Size '{size}' not available")
                 raise ValueError(f"Size '{size}' is not available. Available sizes: {available_sizes}")
         
         # Step 3: Post to /cart/add with extracted IDs
@@ -284,6 +438,7 @@ async def shopify_checkout(product_url, size, visit_base_site=False):
             'Content-Type': 'application/x-www-form-urlencoded'
         }
         
+        add_progress("Adding item to cart")
         print(f"Posting to {cart_add_url} with payload: {payload}")
         try:
             cart_response = await make_request_with_retry(session, 'post', cart_add_url, 'Step 3: Add to cart', expected_status=200, data=payload, headers=cart_headers)
@@ -293,6 +448,7 @@ async def shopify_checkout(product_url, size, visit_base_site=False):
             # Parse and print as JSON only
             response_json = cart_response.json()
             print(json.dumps(response_json, indent=2))
+            add_progress("Item added to cart successfully")
         except Exception as e:
             return {
                 'success': False,
@@ -303,6 +459,7 @@ async def shopify_checkout(product_url, size, visit_base_site=False):
             }
         
         # Step 4: Proceed to checkout and get checkout URL
+        add_progress("Proceeding to checkout")
         print("\n[Step 4] Proceeding to checkout...")
         cart_url = f"{shop_domain}/cart"
         checkout_payload = 'updates[]=1&checkout='
@@ -350,6 +507,7 @@ async def shopify_checkout(product_url, size, visit_base_site=False):
         print("="*50)
         
         # Step 5: Extract cookies and open checkout URL in Playwright
+        add_progress("Generating checkout session")
         print("\n[Step 5] Extracting cookies and opening checkout in Playwright...")
         
         # Extract cookies from session and convert to Playwright format
@@ -393,6 +551,7 @@ async def shopify_checkout(product_url, size, visit_base_site=False):
                 page = await context.new_page()
                 
                 # Navigate to checkout URL
+                add_progress("Opening checkout page")
                 print(f"Opening checkout URL: {checkout_url}")
                 await page.goto(checkout_url, wait_until="domcontentloaded", timeout=60000)
                 print("✓ Checkout page opened in browser")
@@ -404,6 +563,7 @@ async def shopify_checkout(product_url, size, visit_base_site=False):
                 print("Waiting for checkout form to load...")
                 
                 # Fill checkout form fields
+                add_progress("Filling shipping information")
                 print("\nFilling out checkout form...")
                 
                 # Email - wait for it to be visible first
@@ -509,6 +669,7 @@ async def shopify_checkout(product_url, size, visit_base_site=False):
                 
                 # Wait a second for loading
                 await asyncio.sleep(1)
+                add_progress("Entering payment information")
                 print("Waiting for payment form to load...")
                 
                 # Credit card number - try both direct and iframe
@@ -641,6 +802,7 @@ async def shopify_checkout(product_url, size, visit_base_site=False):
                 
                 # Click checkout button
                 try:
+                    add_progress("Submitting order")
                     checkout_button = page.locator('#checkout-pay-button')
                     await checkout_button.wait_for(state='visible', timeout=10000)
                     await asyncio.sleep(1)  # Wait 1 second before clicking pay button
@@ -648,6 +810,81 @@ async def shopify_checkout(product_url, size, visit_base_site=False):
                     print("✓ Checkout button clicked")
                 except Exception:
                     print("⚠️  Checkout button not found or could not be clicked")
+                
+                # Wait for payment processing response
+                add_progress("Processing payment")
+                print("\nWaiting for payment processing...")
+                await asyncio.sleep(5)  # Give time for payment to process
+                
+                # Check for payment declined message or order confirmation
+                try:
+                    page_content = await page.content()
+                    declined_message = "Your card was declined. Try again or use a different payment method"
+                    confirmed_message = "Your order is confirmed"
+                    
+                    # Check for payment declined
+                    if declined_message in page_content:
+                        print("\n❌ Payment Declined Detected")
+                        print("Closing browser and marking task as failed...")
+                        
+                        # Close browser immediately
+                        await browser.close()
+                        
+                        # Return failure result
+                        return {
+                            'success': False,
+                            'error': 'Payment Declined',
+                            'message': declined_message,
+                            'step': 'Payment Processing',
+                            'checkout_url': checkout_url,
+                            'request_log': request_log
+                        }
+                    
+                    # Check for order confirmation
+                    if confirmed_message in page_content:
+                        print("\n✅ Order Confirmed!")
+                        print("Order has been successfully placed.")
+                        print("Closing browser and marking task as complete...")
+                        
+                        # Close browser immediately
+                        await browser.close()
+                        
+                        # Return success result
+                        return {
+                            'success': True,
+                            'status': 'Checked Out',
+                            'message': 'Your order is confirmed',
+                            'step': 'Order Complete',
+                            'checkout_url': checkout_url,
+                            'request_log': request_log
+                        }
+                    
+                    # If neither declined nor confirmed yet, wait a bit longer
+                    print("Payment processing, waiting for confirmation...")
+                    await asyncio.sleep(5)
+                    
+                    # Check again after additional wait
+                    page_content = await page.content()
+                    if confirmed_message in page_content:
+                        print("\n✅ Order Confirmed!")
+                        print("Order has been successfully placed.")
+                        print("Closing browser and marking task as complete...")
+                        
+                        # Close browser immediately
+                        await browser.close()
+                        
+                        # Return success result
+                        return {
+                            'success': True,
+                            'status': 'Checked Out',
+                            'message': 'Your order is confirmed',
+                            'step': 'Order Complete',
+                            'checkout_url': checkout_url,
+                            'request_log': request_log
+                        }
+                    
+                except Exception as e:
+                    print(f"⚠️  Error checking order status: {str(e)}")
                 
                 # Keep browser open - user closes manually
                 print("\nBrowser is open. Close manually when done.")

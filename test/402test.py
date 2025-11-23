@@ -6,9 +6,10 @@ app = FastAPI()
 # x402 paywall on specific routes only
 app.middleware("http")(
     require_payment(
-        price="0.01",  # 0.01 USDC per request (testnet/community facilitator default)
+        price="0.001",  # 0.001 ETH per request
         pay_to_address="0x71C7656EC7ab88b098defB751B7401B5f6d8976F",
-        path=["/premium", "/expensive"]  # <- only these endpoints are paid
+        path=["/premium", "/expensive"],  # <- only these endpoints are paid
+        network="base"  # Base mainnet
     )
 )
 

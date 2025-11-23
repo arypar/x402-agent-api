@@ -5,7 +5,6 @@ Continuously polls Supabase for pending tasks and processes them
 
 import sys
 import os
-import time
 import asyncio
 import traceback
 from datetime import datetime
@@ -21,6 +20,12 @@ from api.database import TaskDatabase
 # Import task handlers
 import uber.uber_api as uber_api
 import shopify.main as shopify_main_module
+
+
+# Custom exception for payment declined errors
+class PaymentDeclinedException(Exception):
+    """Exception raised when payment is declined - should not retry"""
+    pass
 
 
 class TaskWorker:
@@ -61,33 +66,30 @@ class TaskWorker:
         print(f"[{self.worker_id}] To: {input_data['to_address']}")
         
         try:
-            # Step 1: Generate Uber URL
-            TaskDatabase.add_progress_update(task_id, "Generating Uber ride URL")
+            # Initial progress update
+            TaskDatabase.add_progress_update(task_id, "Starting Uber ride booking")
+            
+            # Step 1: Generate Uber URL with task_id for real-time updates
             uber_url = await uber_api.generate_uber_url(
                 input_data['from_address'],
-                input_data['to_address']
+                input_data['to_address'],
+                task_id=task_id
             )
             print(f"[{self.worker_id}] Generated URL: {uber_url}")
             
-            # Step 2: Navigate to URL and book ride
-            TaskDatabase.add_progress_update(task_id, "Opening Uber app")
+            # Step 2: Navigate to URL and book ride with task_id for real-time updates
             print(f"[{self.worker_id}] Starting browser automation...")
             
-            TaskDatabase.add_progress_update(task_id, "Authenticating with Uber")
-            TaskDatabase.add_progress_update(task_id, "Confirming ride details")
-            TaskDatabase.add_progress_update(task_id, "Booking ride")
-            
-            success = await uber_api.navigate_to_auth(uber_url)
+            success = await uber_api.navigate_to_auth(uber_url, task_id=task_id)
             
             if not success:
-                TaskDatabase.add_progress_update(task_id, "Payment declined or booking failed")
+                TaskDatabase.add_progress_update(task_id, "❌ Payment declined")
                 return {
                     "success": False,
                     "message": "Payment was declined or booking failed",
                     "uber_url": uber_url
                 }
             
-            TaskDatabase.add_progress_update(task_id, "Ride booked successfully")
             return {
                 "success": True,
                 "message": "Ride booking process completed",
@@ -116,36 +118,54 @@ class TaskWorker:
         print(f"[{self.worker_id}] Size: {input_data['size']}")
         
         try:
-            # Progress updates for Shopify checkout
-            TaskDatabase.add_progress_update(task_id, "Opening product page")
-            TaskDatabase.add_progress_update(task_id, f"Selecting size: {input_data['size']}")
-            TaskDatabase.add_progress_update(task_id, "Adding product to cart")
+            # Initial progress update
+            TaskDatabase.add_progress_update(task_id, "Starting checkout process")
             
-            # Call the shopify_checkout function
+            # Call the shopify_checkout function with task_id for real-time updates
             result = await shopify_main_module.shopify_checkout(
                 input_data['product_url'],
-                input_data['size']
+                input_data['size'],
+                task_id=task_id
             )
             
             # Check if the checkout was successful
             if result.get('success'):
-                TaskDatabase.add_progress_update(task_id, "Navigating to checkout")
-                TaskDatabase.add_progress_update(task_id, "Filling shipping information")
-                TaskDatabase.add_progress_update(task_id, "Processing payment")
-                TaskDatabase.add_progress_update(task_id, "Order placed successfully")
-                return {
-                    "success": True,
-                    "message": "Order placed successfully",
-                    "order_details": result
-                }
+                # Check if order was confirmed (Checked Out status)
+                if result.get('status') == 'Checked Out':
+                    TaskDatabase.add_progress_update(task_id, "✅ Order confirmed - Checked Out")
+                    return {
+                        "success": True,
+                        "status": "Checked Out",
+                        "message": "Order confirmed successfully",
+                        "order_details": result
+                    }
+                else:
+                    TaskDatabase.add_progress_update(task_id, "Order processing complete")
+                    return {
+                        "success": True,
+                        "message": "Order placed successfully",
+                        "order_details": result
+                    }
             else:
-                TaskDatabase.add_progress_update(task_id, f"Checkout failed: {result.get('error', 'Unknown error')}")
+                # Check if payment was declined - this should fail immediately without retry
+                error = result.get('error', 'Unknown error occurred')
+                if error == 'Payment Declined':
+                    TaskDatabase.add_progress_update(task_id, "Payment Declined")
+                    # Raise a special exception to mark as failed without retry
+                    raise PaymentDeclinedException(result.get('message', 'Your card was declined'))
+                
+                TaskDatabase.add_progress_update(task_id, f"Checkout failed: {error}")
                 return {
                     "success": False,
-                    "error": result.get('error', 'Unknown error occurred'),
+                    "error": error,
                     "order_details": result
                 }
                 
+        except PaymentDeclinedException as e:
+            # Payment declined - don't retry, fail immediately
+            print(f"[{self.worker_id}] Payment declined for Shopify task: {str(e)}")
+            TaskDatabase.add_progress_update(task_id, f"Payment Declined: {str(e)}")
+            raise  # Re-raise to be caught by process_task
         except Exception as e:
             print(f"[{self.worker_id}] Error processing Shopify task: {str(e)}")
             TaskDatabase.add_progress_update(task_id, f"Error: {str(e)}")
@@ -190,6 +210,18 @@ class TaskWorker:
             )
             
             print(f"[{self.worker_id}] ✓ Task {task_id} completed successfully")
+            
+        except PaymentDeclinedException as e:
+            # Payment declined - mark as failed immediately without retry
+            error_message = f"Payment Declined: {str(e)}"
+            print(f"[{self.worker_id}] ✗ Task {task_id} failed - Payment Declined")
+            
+            TaskDatabase.update_task_status(
+                task_id=task_id,
+                status="failed",
+                error_message=error_message,
+                result_data={"error": "Payment Declined", "message": str(e)}
+            )
             
         except Exception as e:
             error_message = f"{type(e).__name__}: {str(e)}"
