@@ -57,40 +57,89 @@ def add_progress(message, task_id=None):
 async def generate_uber_url(from_address: str, to_address: str, task_id: str = None) -> str:
     """Use Claude to generate an Uber URL from addresses using /looking endpoint"""
     
-    add_progress("Converting addresses to coordinates", task_id)
+    add_progress("Analyzing addresses with deep reasoning", task_id)
     
-    prompt = f"""Given these two addresses, provide the latitude and longitude coordinates for each:
+    prompt = f"""You are a precise geolocation expert. I need you to determine the EXACT coordinates for these two addresses.
 
 Pickup address: {from_address}
 Destination address: {to_address}
 
-Return the coordinates in this exact JSON format:
+IMPORTANT INSTRUCTIONS:
+1. First, carefully reason about each address:
+   - What country is this in? Consider city names, landmarks, and contextual clues
+   - What specific city/town is this referring to?
+   - If there are multiple places with the same name, use context clues to determine the most likely one
+   - Consider common abbreviations (e.g., "St" could be "Street" or "Saint")
+
+2. Once you've identified the exact location:
+   - Provide the most precise latitude and longitude coordinates possible (to at least 6 decimal places)
+   - Coordinates should pinpoint the exact street address or landmark, not just the city center
+   - Double-check that the coordinates make sense for the identified country/region
+
+3. Be especially careful with:
+   - Addresses that might exist in multiple countries (e.g., "Paris" could be France, Texas, Ontario, etc.)
+   - Common place names (e.g., "Main Street" exists everywhere)
+   - Landmarks that might have moved or have multiple locations
+   - International addresses with different formatting conventions
+
+Think through this step-by-step, then return ONLY a JSON response in this exact format:
 {{
   "pickup": {{
-    "latitude": <latitude>,
-    "longitude": <longitude>
+    "latitude": <precise_latitude>,
+    "longitude": <precise_longitude>,
+    "identified_as": "<country, city, specific location>",
+    "confidence": "<high/medium/low>"
   }},
   "drop": {{
-    "latitude": <latitude>,
-    "longitude": <longitude>
+    "latitude": <precise_latitude>,
+    "longitude": <precise_longitude>,
+    "identified_as": "<country, city, specific location>",
+    "confidence": "<high/medium/low>"
   }}
 }}
 
-Return ONLY the JSON, nothing else. No explanations, no markdown formatting."""
+Return ONLY the JSON, nothing else."""
 
     try:
-        # Use Anthropic API directly to get coordinates
+        # Use Anthropic API directly to get coordinates with extended thinking
         client = AsyncAnthropic()
-        message = await client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=500,
-            messages=[{
-                "role": "user",
-                "content": prompt
-            }]
-        )
         
-        response_text = message.content[0].text.strip()
+        # Try with extended thinking first for best accuracy
+        try:
+            message = await client.messages.create(
+                model="claude-sonnet-4-20250514",
+                max_tokens=8000,  # Must be greater than thinking budget_tokens
+                temperature=1,  # Required to be 1 when using extended thinking
+                messages=[{
+                    "role": "user",
+                    "content": prompt
+                }],
+                thinking={
+                    "type": "enabled",
+                    "budget_tokens": 5000  # Allow extended thinking for better reasoning
+                }
+            )
+            print("✓ Using extended thinking for enhanced location reasoning")
+        except Exception as thinking_error:
+            # Fallback to standard API call if extended thinking fails
+            print(f"⚠️  Extended thinking unavailable: {thinking_error}")
+            print("Falling back to standard reasoning mode")
+            message = await client.messages.create(
+                model="claude-sonnet-4-20250514",
+                max_tokens=2000,
+                temperature=0,
+                messages=[{
+                    "role": "user",
+                    "content": prompt
+                }]
+            )
+        
+        # Extract the text response (thinking content is separate)
+        response_text = ""
+        for block in message.content:
+            if block.type == "text":
+                response_text = block.text.strip()
+                break
         
         # Clean up the response if it has markdown formatting
         if response_text.startswith("```"):
@@ -101,11 +150,35 @@ Return ONLY the JSON, nothing else. No explanations, no markdown formatting."""
         # Parse JSON response
         coords = json.loads(response_text)
         
+        # Extract coordinates
         pickup_lat = coords["pickup"]["latitude"]
         pickup_lng = coords["pickup"]["longitude"]
         drop_lat = coords["drop"]["latitude"]
         drop_lng = coords["drop"]["longitude"]
         
+        # Log the identified locations for transparency
+        pickup_location = coords["pickup"].get("identified_as", "Unknown")
+        pickup_confidence = coords["pickup"].get("confidence", "Unknown")
+        drop_location = coords["drop"].get("identified_as", "Unknown")
+        drop_confidence = coords["drop"].get("confidence", "Unknown")
+        
+        print(f"✓ Pickup: {pickup_location} (confidence: {pickup_confidence})")
+        print(f"  Coordinates: {pickup_lat}, {pickup_lng}")
+        print(f"✓ Drop-off: {drop_location} (confidence: {drop_confidence})")
+        print(f"  Coordinates: {drop_lat}, {drop_lng}")
+        
+        # Warn if confidence is low
+        if pickup_confidence.lower() == "low":
+            warning_msg = f"⚠️  Low confidence for pickup location: {pickup_location}"
+            print(warning_msg)
+            add_progress(warning_msg, task_id)
+        
+        if drop_confidence.lower() == "low":
+            warning_msg = f"⚠️  Low confidence for drop-off location: {drop_location}"
+            print(warning_msg)
+            add_progress(warning_msg, task_id)
+        
+        add_progress(f"Locations identified - Pickup: {pickup_location}, Drop: {drop_location}", task_id)
         add_progress("Generating Uber ride URL", task_id)
         
         # Build the Uber /looking URL (compact JSON without spaces)
